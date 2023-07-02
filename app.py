@@ -28,6 +28,8 @@ engine = salc.create_engine(
     database_connection_string,
     connect_args={'options': '-csearch_path={}'.format(dbschema)})
 
+#------------------------------------------------------ AUGUR QUERY ------------------------------------------------------ 
+
 def fetch_data(repo_org, repo_name):
   # commit author query
   cmt_query = salc.sql.text(f"""
@@ -167,12 +169,9 @@ def fetch_data(repo_org, repo_name):
   prm_data['year'] = pd.to_datetime(prm_data['timestamp'], utc=True).dt.year
   prm_data['month'] = pd.to_datetime(prm_data['timestamp'], utc=True).dt.month
 
-  #data = [(year, month) for year in set(cmt_data['year']) | set(pr_data['year']) | set(ism_data['year']) | set(prm_data['year']) for month in set(cmt_data[cmt_data['year'] == year]['month']) | set(pr_data[pr_data['year'] == year]['month']) | set(ism_data[ism_data['year'] == year]['month']) | set(prm_data[prm_data['year'] == year]['month'])]
-  #start_year, start_month = min(data)
-  #print("Earlies entry: \n month:", start_month, "\n year:", start_year)
-
   return cmt_data, ism_data, pr_data, prm_data
 
+#------------------------------------------------------ INTERVAL CALCULATION ------------------------------------------------------ 
 
 def get_intervals(start_year, start_month, end_year, end_month, interval): 
     total_frames = ((end_year - start_year) * 12 + (end_month - start_month)) // interval
@@ -213,11 +212,12 @@ def get_marks(start_year, start_month, end_year, end_month, interval):
             start_month = 1
             start_year += 1
     return marks 
+
+#------------------------------------------------------ GET DATA FOR PLOTS ------------------------------------------------------ 
 # threshold not implemented 
-def update_graphs(repo_org, repo_name, start_year, start_month, end_year, end_month, interval): 
+def get_plot_data(repo_org, repo_name, start_year, start_month, end_year, end_month, interval, cmt_weight, ism_weight, pr_weight, prm_weight): 
     cmt_data, ism_data, pr_data, prm_data = fetch_data(repo_org, repo_name)
 
-    fig, ax = plt.subplots()
     snapshot_G = nx.Graph()
     last_nodes = set()
     prev_nodes = set()
@@ -250,11 +250,6 @@ def update_graphs(repo_org, repo_name, start_year, start_month, end_year, end_mo
         if snap_end_month > 12:
             snap_end_month -= 12
             snap_end_year += 1
-
-        cmt_weight = 1
-        ism_weight = 0.1
-        pr_weight = 2
-        prm_weight = 0.5
 
         # add nodes and edges to the snapshot_G graph based on the snapshot data
         snapshot_cmt = cmt_data[(cmt_data['year'].between(snap_start_year, snap_end_year)) &
@@ -321,15 +316,9 @@ def update_graphs(repo_org, repo_name, start_year, start_month, end_year, end_mo
                         else:
                             snapshot_G.add_edge(contributors[i], contributors[j], pr=pr_id, weight=prm_weight)
 
-        # calculate pagerank scores and scale to use for node sizes
+        # calculate pagerank score threshold
         pagerank_scores = nx.pagerank(snapshot_G)
-        min_score = min(pagerank_scores.values())
-        max_score = max(pagerank_scores.values())
-        min_size = 50
-        max_size = 150
-        scaled_scores = {node: (pagerank_scores[node] - min_score) / (max_score - min_score) for node in snapshot_G.nodes()}
 
-        # calculate elbow score to use for threshold
         #threshold_score = find_threshold(np.array(list(pagerank_scores.values())), threshold)
         scores = np.sort(np.array(list(pagerank_scores.values())))
         diff = np.diff(scores)
@@ -344,8 +333,6 @@ def update_graphs(repo_org, repo_name, start_year, start_month, end_year, end_mo
             core_intervals = {}
 
         node_colors = ['r' if pagerank_scores[n] >= threshold_score else 'b' if n in prev_nodes else 'y' for n in snapshot_G.nodes()]
-        node_sizes = [min_size + (max_size - min_size) * scaled_scores[node] for node in snapshot_G.nodes()]
-        edge_widths = [snapshot_G[u][v]['weight'] * 0.1 for u, v in snapshot_G.edges()]
         core_nodes = set([node for node in set(snapshot_G.nodes()) if pagerank_scores[node] >= threshold_score])
         peripheral_nodes = set([node for node in set(snapshot_G.nodes()) if pagerank_scores[node] < threshold_score])
 
@@ -356,9 +343,7 @@ def update_graphs(repo_org, repo_name, start_year, start_month, end_year, end_mo
         avg_intervals[frame] = sum(core_intervals[node] for node in core_nodes) / len(core_nodes)
 
         prev_nodes = prev_nodes | set(snapshot_G.nodes())
-        # calculate the number of nodes transitioning from peripheral to core
         peripheral_to_core = len(prev_peripheral.intersection(core_nodes))
-        # calculate the number of nodes transitioning from core to peripheral
         core_to_peripheral = len(prev_core.intersection(peripheral_nodes))
 
         # update the prev_nodes, prev_core, and prev_peripheral variables for the next frame
@@ -391,7 +376,8 @@ def update_graphs(repo_org, repo_name, start_year, start_month, end_year, end_mo
 
     return core, peripheral, new, peripheral_to_core_list, core_to_peripheral_list, avg_intervals
 
-def update_plots(intervals, core, peripheral, new, peripheral_to_core_list, core_to_peripheral_list, avg_intervals):
+#------------------------------------------------------ PLOT TRENDS ------------------------------------------------------ 
+def draw_plots(intervals, core, peripheral, new, peripheral_to_core_list, core_to_peripheral_list, avg_intervals):
     core_trace = go.Scatter(
         y = core,
         x = intervals,
@@ -441,8 +427,9 @@ def update_plots(intervals, core, peripheral, new, peripheral_to_core_list, core
         connectgaps = True
     )
     return core_trace, per_trace, new_trace, promo_trace, demo_trace, avg_int_trace
-    
-def update_graph(slider_value, slider_marks, data): 
+
+#------------------------------------------------------ NETWORK GRAPH ------------------------------------------------------ 
+def draw_network(slider_value, slider_marks, data, cmt_weight, ism_weight, pr_weight, prm_weight): 
     cmt_data, ism_data, pr_data, prm_data = data
     start_month, start_year = map(int, slider_marks[str(slider_value[0])].split("/"))
     end_month, end_year = map(int, slider_marks[str(slider_value[1])].split("/"))
@@ -458,10 +445,6 @@ def update_graph(slider_value, slider_marks, data):
     
     fig, ax = plt.subplots(figsize=(20, 20))
     G = nx.Graph()
-    cmt_weight = 1
-    ism_weight = 0.1
-    pr_weight = 2
-    prm_weight = 0.5
 
     # cmt_data
     edge_counts = snapshot_cmt.groupby(['author_id', 'committer_id']).size()
@@ -571,7 +554,6 @@ def update_graph(slider_value, slider_marks, data):
         mode='markers',
         hoverinfo='text')
     
-    
     node_adjacencies = []
     node_text = []
     for node, adjacencies in enumerate(G.adjacency()):
@@ -580,8 +562,6 @@ def update_graph(slider_value, slider_marks, data):
 
     node_trace.marker.color = node_colors
     node_trace.text = node_text
-
-
     
     fig = go.Figure(data=[edge_trace, node_trace],
                 layout=go.Layout(
@@ -739,19 +719,19 @@ app.layout = html.Div(
                 html.Div(id="threshold-input"),
                 html.Br(),
                 html.H4("Event Type Weights:"),
-                html.Label("Commit author:          "),
-                dcc.Input(id="cmt-weight", type="number", placeholder="1.0", style={"margin-bottom": "10px"}),
+                html.Label("Commit author:"),
+                dcc.Slider(id="cmt-weight", min=0, max=2, step=0.1, value=1.0, marks={i: str(i) for i in [0, 0.5, 1, 1.5, 2]}),
                 html.Br(),
-                html.Label("Issue message thread:  "),
-                dcc.Input(id="ism-weight", type="number", placeholder="0.1", style={"margin-bottom": "10px"}),
+                html.Label("Issue message thread:"),
+                dcc.Slider(id="ism-weight", min=0, max=2, step=0.1, value=0.1, marks={i: str(i) for i in [0, 0.5, 1, 1.5, 2]}),
                 html.Br(),
-                html.Label("PR reviewer:  "),
-                dcc.Input(id="pr-weight", type="number", placeholder="2.0", style={"margin-bottom": "10px"}),
+                html.Label("PR reviewer:"),
+                dcc.Slider(id="pr-weight", min=0, max=2, step=0.1, value=2.0, marks={i: str(i) for i in [0, 0.5, 1, 1.5, 2]}),
                 html.Br(),
-                html.Label("PR message thread:  "),
-                dcc.Input(id="prm-weight", type="number", placeholder="0.5", style={"margin-bottom": "10px"}),
+                html.Label("PR message thread:"),
+                dcc.Slider(id="prm-weight", min=0, max=2, step=0.1, value=0.5, marks={i: str(i) for i in [0, 0.5, 1, 1.5, 2]}),
                 html.P(
-                    "Optional: default = 1.0, 0.1, 2.0, 0.5",
+                    "Optional: default = 1.0, 0.1, 2.0, 0.5 (based on Orbit model)",
                     style={"font-size": "12px", "color": "gray"}
                 ),
                 html.Br(),
@@ -804,7 +784,7 @@ def set_slider(n_clicks, start_year, start_month, end_year, end_month, interval)
 )
 def update_network(n_clicks, repo_org, repo_name, slider_value, slider_marks):
     data = fetch_data(repo_org, repo_name)
-    return update_graph(slider_value, slider_marks, data)
+    return draw_network(slider_value, slider_marks, data)
 
 @app.callback(
     [
@@ -824,15 +804,19 @@ def update_network(n_clicks, repo_org, repo_name, slider_value, slider_marks):
         State('end-month', 'value'),
         State('interval', 'value'),
         State('cardinality-checklist', 'value'),
-        State('promo-demo-checklist', 'value')
+        State('promo-demo-checklist', 'value'), 
+        State('cmt-weight', 'value'), 
+        State('ism-weight', 'value'), 
+        State('pr-weight', 'value'), 
+        State('prm-weight', 'value')
     ],
     prevent_initial_call=True
 )
-def plot(n_clicks, repo_org, repo_name, start_year, start_month, end_year, end_month, interval, card_checks, promo_checks):
+def plot(n_clicks, repo_org, repo_name, start_year, start_month, end_year, end_month, interval, card_checks, promo_checks, cmt_weight, ism_weight, pr_weight, prm_weight):
 
     intervals = get_intervals(start_year, start_month, end_year, end_month, interval)
-    core, peripheral, new, peripheral_to_core_list, core_to_peripheral_list, avg_intervals = update_graphs(repo_org, repo_name, start_year, start_month, end_year, end_month, interval)
-    core_trace, per_trace, new_trace, promo_trace, demo_trace, avg_int_trace = update_plots(intervals, core, peripheral, new, peripheral_to_core_list, core_to_peripheral_list, avg_intervals)
+    core, peripheral, new, peripheral_to_core_list, core_to_peripheral_list, avg_intervals = get_plot_data(repo_org, repo_name, start_year, start_month, end_year, end_month, interval, cmt_weight, ism_weight, pr_weight, prm_weight)
+    core_trace, per_trace, new_trace, promo_trace, demo_trace, avg_int_trace = draw_plots(intervals, core, peripheral, new, peripheral_to_core_list, core_to_peripheral_list, avg_intervals)
      
     data1 = []
     for c in card_checks: 
